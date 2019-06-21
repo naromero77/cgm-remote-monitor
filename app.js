@@ -1,13 +1,13 @@
 'use strict';
 
-var _get = require('lodash/get');
-var express = require('express');
-var compression = require('compression');
-var bodyParser = require('body-parser');
-var prettyjson = require('prettyjson');
+const _get = require('lodash/get');
+const express = require('express');
+const compression = require('compression');
+const bodyParser = require('body-parser');
+const prettyjson = require('prettyjson');
 
-var path = require('path');
-var fs = require('fs');
+const path = require('path');
+const fs = require('fs');
 
 function create(env, ctx) {
     var app = express();
@@ -16,8 +16,8 @@ function create(env, ctx) {
     app.enable('trust proxy'); // Allows req.secure test on heroku https connections.
     var insecureUseHttp = env.insecureUseHttp;
     var secureHstsHeader = env.secureHstsHeader;
-    console.info('Security settings: INSECURE_USE_HTTP=',insecureUseHttp,', SECURE_HSTS_HEADER=',secureHstsHeader);
     if (!insecureUseHttp) {
+        console.info('Redirecting http traffic to https because INSECURE_USE_HTTP=', insecureUseHttp);
         app.use((req, res, next) => {
         if (req.header('x-forwarded-proto') == 'https' || req.secure) {
             next();
@@ -26,6 +26,7 @@ function create(env, ctx) {
         }
         })
         if (secureHstsHeader) { // Add HSTS (HTTP Strict Transport Security) header
+          console.info('Enabled SECURE_HSTS_HEADER (HTTP Strict Transport Security)');
           const helmet = require('helmet');
           var includeSubDomainsValue = env.secureHstsHeaderIncludeSubdomains;
           var preloadValue = env.secureHstsHeaderPreload;
@@ -34,19 +35,47 @@ function create(env, ctx) {
               maxAge: 31536000,
               includeSubDomains: includeSubDomainsValue,
               preload: preloadValue
-            }
-          }))
+            },
+            frameguard: false
+          }));
           if (env.secureCsp) {
+            var secureCspReportOnly= env.secureCspReportOnly;
+            if (secureCspReportOnly) {
+              console.info( 'Enabled SECURE_CSP (Content Security Policy header). Not enforcing. Report only.' );
+            } else {
+              console.info( 'Enabled SECURE_CSP (Content Security Policy header). Enforcing.' );
+            }
             app.use(helmet.contentSecurityPolicy({ //TODO make NS work without 'unsafe-inline'
               directives: {
                 defaultSrc: ["'self'"],
                 styleSrc: ["'self'", 'https://fonts.googleapis.com/',"'unsafe-inline'"],
                 scriptSrc: ["'self'", "'unsafe-inline'"],
-                fontSrc: [ "'self'", 'https://fonts.gstatic.com/']
-              }
+                fontSrc: [ "'self'", 'https://fonts.gstatic.com/', 'data:'],
+                imgSrc: [ "'self'", 'data:'],
+                objectSrc: ["'none'"], // Restricts <object>, <embed>, and <applet> elements
+                reportUri: '/report-violation',
+                frameAncestors: ["'none'"], // Clickjacking protection, using frame-ancestors
+                baseUri: ["'none'"], // Restricts use of the <base> tag
+                formAction: ["'self'"], // Restricts where <form> contents may be submitted
+              },
+              reportOnly: secureCspReportOnly
             }));
+            app.use(helmet.referrerPolicy({ policy: 'no-referrer' }));
+            app.use(helmet.featurePolicy({ features: { payment: ["'none'"], } }));
+            app.use(bodyParser.json({type: ['json', 'application/csp-report'] }))
+              app.post('/report-violation', (req, res) => {
+                if (req.body) {
+                  console.log('CSP Violation: ', req.body) }
+                else {
+                  console.log('CSP Violation: No data received!')
+                }
+                res.status(204).end()
+              })
           }
         }
+     }
+     else { 
+       console.info('Security settings: INSECURE_USE_HTTP=',insecureUseHttp,', SECURE_HSTS_HEADER=',secureHstsHeader);
      }
 
     app.set('view engine', 'ejs');
@@ -92,6 +121,9 @@ function create(env, ctx) {
             return compression.filter(req, res);
         }
     }));
+
+    const clockviews = require('./lib/server/clocks.js')(env, ctx);
+    app.use("/clock", clockviews);
 
     app.get("/", (req, res) => {
         res.render("index.html", {
@@ -139,6 +171,12 @@ function create(env, ctx) {
     app.get('/swagger.json', function(req, res) {
         res.sendFile(__dirname + '/swagger.json');
     });
+
+    // expose swagger.yaml
+    app.get('/swagger.yaml', function(req, res) {
+        res.sendFile(__dirname + '/swagger.yaml');
+    });
+
 
 /*
     if (env.settings.isEnabled('dumps')) {
